@@ -17,6 +17,67 @@ _MODEL_URL = (
     "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
 
+_SFACE_MODEL_PATH = "face_recognition_sface_2021dec.onnx"
+_SFACE_MODEL_URL = (
+    "https://github.com/opencv/opencv_zoo/raw/main/models/"
+    "face_recognition_sface/face_recognition_sface_2021dec.onnx"
+)
+_sface_recognizer = None
+
+
+def _ensure_sface_model():
+    if not os.path.exists(_SFACE_MODEL_PATH):
+        urllib.request.urlretrieve(_SFACE_MODEL_URL, _SFACE_MODEL_PATH)
+
+
+def get_sface_recognizer():
+    global _sface_recognizer
+    if _sface_recognizer is None:
+        _ensure_sface_model()
+        _sface_recognizer = cv2.FaceRecognizerSF.create(_SFACE_MODEL_PATH, "")
+    return _sface_recognizer
+
+
+def extract_deep_face_embedding(image: np.ndarray, raw_landmarks: list) -> np.ndarray:
+    """
+    Extract a normalized 128-dimensional deep feature embedding using OpenCV SFace CNN.
+    Aligns the face using MediaPipe 5 primary keypoints and passes the 112x112 crop through SFace.
+    """
+    recognizer = get_sface_recognizer()
+    img = image.copy()
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+
+    h, w = img.shape[:2]
+    pts = np.array(raw_landmarks, dtype=float).reshape(-1, 3)
+    xs = pts[:, 0] * w
+    ys = pts[:, 1] * h
+
+    xmin, xmax = float(np.clip(xs.min(), 0, w)), float(np.clip(xs.max(), 0, w))
+    ymin, ymax = float(np.clip(ys.min(), 0, h)), float(np.clip(ys.max(), 0, h))
+    bw = max(10.0, xmax - xmin)
+    bh = max(10.0, ymax - ymin)
+
+    # 5 Keypoints: Right eye (33), Left eye (263), Nose tip (1), Right mouth (61), Left mouth (291)
+    re_x, re_y = float(xs[33]), float(ys[33])
+    le_x, le_y = float(xs[263]), float(ys[263])
+    nt_x, nt_y = float(xs[1]), float(ys[1])
+    rm_x, rm_y = float(xs[61]), float(ys[61])
+    lm_x, lm_y = float(xs[291]), float(ys[291])
+
+    face_arr = np.array(
+        [xmin, ymin, bw, bh, re_x, re_y, le_x, le_y, nt_x, nt_y, rm_x, rm_y, lm_x, lm_y, 0.99],
+        dtype=np.float32,
+    )
+    aligned = recognizer.alignCrop(img, face_arr)
+    feat = recognizer.feature(aligned).flatten()
+    norm = np.linalg.norm(feat)
+    if norm > 1e-6:
+        feat = feat / norm
+    return feat
+
 
 def _ensure_model():
     if not os.path.exists(_MODEL_PATH):
@@ -246,3 +307,155 @@ def extract_unique_faces_from_video(
 
     cap.release()
     return unique_faces
+
+
+def create_base_map(
+    location=[22.9734, 78.6569],
+    zoom_start=5,
+    mapbox_token: str = None,
+    style: str = "streets",
+):
+    """
+    Creates a Folium base map centered over India.
+    Default style is vibrant colorful Mapbox Streets (streets-v12).
+    Also supports Outdoors (rich terrain), Satellite, Dark, and Light.
+    """
+    import folium
+
+    DEFAULT_MAPBOX_TOKEN = ""
+
+    env_token = os.environ.get("MAPBOX_TOKEN")
+    if not env_token and os.path.exists(".env"):
+        try:
+            with open(".env", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith("MAPBOX_TOKEN="):
+                        env_token = line.strip().split("=", 1)[1].strip("'\" ")
+                        break
+        except Exception:
+            pass
+
+    token = (
+        mapbox_token
+        or (st.session_state.get("mapbox_token") if "mapbox_token" in st.session_state else None)
+        or env_token
+        or DEFAULT_MAPBOX_TOKEN
+    )
+    if token and hasattr(token, "strip"):
+        token = token.strip()
+
+    if token:
+        style_map = {
+            "streets": "streets-v12",
+            "outdoors": "outdoors-v12",
+            "satellite": "satellite-streets-v12",
+            "dark": "dark-v11",
+            "light": "light-v11",
+        }
+        style_key = style.lower()
+        if "outdoor" in style_key:
+            style_id = "outdoors-v12"
+        elif "satellit" in style_key:
+            style_id = "satellite-streets-v12"
+        elif "dark" in style_key:
+            style_id = "dark-v11"
+        elif "light" in style_key:
+            style_id = "light-v11"
+        else:
+            style_id = "streets-v12"
+
+        tiles_url = f"https://api.mapbox.com/styles/v1/mapbox/{style_id}/tiles/{{z}}/{{x}}/{{y}}?access_token={token}"
+        m = folium.Map(location=location, zoom_start=zoom_start, tiles=None, control_scale=True)
+        folium.TileLayer(
+            tiles=tiles_url,
+            attr="&copy; <a href='https://www.mapbox.com/about/maps/'>Mapbox</a> &copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a>",
+            name=f"Mapbox ({style_id})",
+            max_zoom=19,
+        ).add_to(m)
+    else:
+        m = folium.Map(
+            location=location,
+            zoom_start=zoom_start,
+            tiles="OpenStreetMap",
+            control_scale=True,
+        )
+    return m
+
+
+def add_city_case_markers(m, counts: dict, city_coords: dict):
+    """
+    Renders high-visibility, modern glowing biometric markers for each city.
+    """
+    import folium
+
+    for city, data in counts.items():
+        found = data.get("found", 0)
+        not_found = data.get("not_found", 0)
+        total = found + not_found
+        if total <= 0:
+            continue
+
+        coords = city_coords.get(city)
+        if coords is None:
+            for key, val in city_coords.items():
+                if key.lower() == city.lower():
+                    coords = val
+                    break
+        if coords is None:
+            continue
+
+        has_unresolved = not_found > 0
+        primary_color = "#e53935" if has_unresolved else "#2e7d32"
+        fill_color = "#ff5252" if has_unresolved else "#4caf50"
+        status_text = "🔴 Active Missing Cases" if has_unresolved else "🟢 All Cases Resolved"
+        pct_resolved = round((found / total) * 100) if total > 0 else 0
+
+        # Dynamic radius based on total cases
+        glow_radius = max(16, min(48, 14 + total * 6))
+        core_radius = max(8, min(24, 7 + total * 3))
+
+        tooltip_html = f"""
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; min-width: 170px; padding: 4px;">
+            <div style="font-size: 1.05rem; font-weight: bold; color: #111; margin-bottom: 4px; border-bottom: 2px solid {primary_color}; padding-bottom: 2px;">
+                📍 {city}
+            </div>
+            <div style="font-size: 0.85rem; font-weight: 600; color: {primary_color}; margin-bottom: 6px;">
+                {status_text}
+            </div>
+            <div style="font-size: 0.82rem; color: #333; line-height: 1.4;">
+                • <b>Total Cases:</b> {total}<br>
+                • <span style="color: #c62828;"><b>Unresolved (Missing):</b> {not_found}</span><br>
+                • <span style="color: #2e7d32;"><b>Resolved (Found):</b> {found}</span>
+            </div>
+            <div style="margin-top: 6px; background-color: #e0e0e0; border-radius: 4px; height: 6px; overflow: hidden;">
+                <div style="background-color: #2e7d32; width: {pct_resolved}%; height: 100%;"></div>
+            </div>
+            <div style="font-size: 0.72rem; color: #666; text-align: right; margin-top: 2px;">
+                {pct_resolved}% Resolved
+            </div>
+        </div>
+        """
+
+        # 1. Outer translucent pulsating aura
+        folium.CircleMarker(
+            location=coords,
+            radius=glow_radius,
+            color=primary_color,
+            weight=1.5,
+            fill=True,
+            fill_color=fill_color,
+            fill_opacity=0.22,
+        ).add_to(m)
+
+        # 2. Inner crisp core marker with rich tooltip and popup
+        folium.CircleMarker(
+            location=coords,
+            radius=core_radius,
+            color="#ffffff",
+            weight=2.5,
+            fill=True,
+            fill_color=primary_color,
+            fill_opacity=0.9,
+            tooltip=folium.Tooltip(tooltip_html, sticky=True),
+            popup=folium.Popup(tooltip_html, max_width=250),
+        ).add_to(m)

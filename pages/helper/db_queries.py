@@ -2,17 +2,20 @@ import os
 import sqlite3
 from sqlmodel import create_engine, Session, select
 
-from pages.helper.data_models import RegisteredCases, PublicSubmissions
+from pages.helper.data_models import RegisteredCases, PublicSubmissions, Users
+from pages.helper import mongo_db
 
 sqlite_url = "sqlite:///sqlite_database.db"
 engine = create_engine(sqlite_url)
 
 
+from sqlmodel import SQLModel
+
+
 def create_db():
     try:
-        RegisteredCases.__table__.create(engine)
-        PublicSubmissions.__table__.create(engine)
-    except:
+        SQLModel.metadata.create_all(engine)
+    except Exception:
         pass
     # Add new columns to existing tables if they don't exist (SQLite migration)
     _migrate_db()
@@ -24,6 +27,10 @@ def _migrate_db():
         ("registeredcases", "complainant_email", "TEXT"),
         ("registeredcases", "city", "TEXT"),
         ("registeredcases", "description", "TEXT"),
+        ("registeredcases", "case_number", "TEXT"),
+        ("registeredcases", "gender", "TEXT"),
+        ("registeredcases", "height", "TEXT"),
+        ("registeredcases", "last_seen_datetime", "TEXT"),
     ]
     try:
         con = sqlite3.connect("sqlite_database.db")
@@ -43,31 +50,42 @@ def register_new_case(case_details: RegisteredCases):
     with Session(engine) as session:
         session.add(case_details)
         session.commit()
+    try:
+        mongo_db.save_registered_case_to_mongo(case_details)
+    except Exception as e:
+        print(f"[db_queries] MongoDB sync error: {e}")
 
 
-def fetch_registered_cases(submitted_by: str, status: str):
-    print(f"submitted_by: {submitted_by}")
+def fetch_registered_cases(submitted_by: str, status: str, view_all: bool = True):
     if status == "All":
-        status = ["F", "NF"]
+        status_list = ["F", "NF"]
     elif status == "Found":
-        status = ["F"]
+        status_list = ["F"]
     elif status == "Not Found":
-        status = ["NF"]
+        status_list = ["NF"]
+    else:
+        status_list = ["F", "NF"]
 
     with Session(engine) as session:
-        result = session.exec(
-            select(
-                RegisteredCases.id,
-                RegisteredCases.name,
-                RegisteredCases.age,
-                RegisteredCases.status,
-                RegisteredCases.last_seen,
-                RegisteredCases.matched_with,
-            )
-            .where(RegisteredCases.submitted_by == submitted_by)
-            .where(RegisteredCases.status.in_(status))
-        ).all()
-        return result
+        query = select(
+            RegisteredCases.id,
+            RegisteredCases.name,
+            RegisteredCases.age,
+            RegisteredCases.status,
+            RegisteredCases.last_seen,
+            RegisteredCases.submitted_by,
+            RegisteredCases.matched_with,
+            RegisteredCases.case_number,
+            RegisteredCases.gender,
+            RegisteredCases.height,
+            RegisteredCases.last_seen_datetime,
+            RegisteredCases.city,
+        ).where(RegisteredCases.status.in_(status_list))
+
+        if not view_all and submitted_by:
+            query = query.where(RegisteredCases.submitted_by == submitted_by)
+
+        return session.exec(query).all()
 
 
 def fetch_public_cases(train_data: bool, status: str):
@@ -106,20 +124,22 @@ def get_not_confirmed_registered_cases(submitted_by: str):
         return result
 
 
-def get_training_data(submitted_by: str):
+def get_training_data(submitted_by: str = None):
     with Session(engine) as session:
-        result = session.exec(
-            select(RegisteredCases.id, RegisteredCases.face_mesh)
-            .where(RegisteredCases.submitted_by == submitted_by)
-            .where(RegisteredCases.status == "NF")
-        ).all()
-        return result
+        query = select(RegisteredCases.id, RegisteredCases.face_mesh).where(RegisteredCases.status == "NF")
+        if submitted_by:
+            query = query.where(RegisteredCases.submitted_by == submitted_by)
+        return session.exec(query).all()
 
 
 def new_public_case(public_case_details: PublicSubmissions):
     with Session(engine) as session:
         session.add(public_case_details)
         session.commit()
+    try:
+        mongo_db.save_public_case_to_mongo(public_case_details)
+    except Exception as e:
+        print(f"[db_queries] MongoDB sync error: {e}")
 
 
 def get_public_case_detail(case_id: str):
@@ -172,16 +192,18 @@ def update_found_status(register_case_id: str, public_case_id: str):
         session.add(registered_case_details)
         session.add(public_case_details)
         session.commit()
+    try:
+        mongo_db.update_found_status_in_mongo(register_case_id, public_case_id)
+    except Exception as e:
+        print(f"[db_queries] MongoDB update error: {e}")
 
 
-def get_registered_cases_count(submitted_by: str, status: str):
+def get_registered_cases_count(submitted_by: str = None, status: str = "NF"):
     with Session(engine) as session:
-        result = session.exec(
-            select(RegisteredCases)
-            .where(RegisteredCases.submitted_by == submitted_by)
-            .where(RegisteredCases.status == status)
-        ).all()
-        return result
+        query = select(RegisteredCases).where(RegisteredCases.status == status)
+        if submitted_by:
+            query = query.where(RegisteredCases.submitted_by == submitted_by)
+        return session.exec(query).all()
 
 
 def get_case_counts_by_city():
@@ -214,6 +236,10 @@ def delete_registered_case(case_id: str):
     image_path = f"./resources/{case_id}.jpg"
     if os.path.exists(image_path):
         os.remove(image_path)
+    try:
+        mongo_db.delete_registered_case_in_mongo(case_id)
+    except Exception as e:
+        print(f"[db_queries] MongoDB delete error: {e}")
 
 
 def update_registered_case(case_id: str, fields: dict):
@@ -225,6 +251,10 @@ def update_registered_case(case_id: str, fields: dict):
             setattr(case, key, value)
         session.add(case)
         session.commit()
+    try:
+        mongo_db.update_registered_case_in_mongo(case_id, fields)
+    except Exception as e:
+        print(f"[db_queries] MongoDB update error: {e}")
 
 
 if __name__ == "__main__":

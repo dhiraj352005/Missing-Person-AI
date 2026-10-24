@@ -10,24 +10,21 @@ from sklearn.neighbors import KNeighborsClassifier
 from pages.helper import db_queries
 
 
-def _get_db_row_count(submitted_by: str) -> int:
-    """Return the number of NF registered cases for this user (used for cache invalidation)."""
+def _get_db_row_count(submitted_by: str = None) -> int:
+    """Return the number of NF registered cases (used for cache invalidation)."""
     try:
-        rows = db_queries.get_training_data(submitted_by)
+        rows = db_queries.get_training_data(None)
         return len(list(rows))
     except Exception:
         return -1
 
 
-def get_train_data(submitted_by: str):
+def get_train_data(submitted_by: str = None):
     """
-    Gets the training data for the user logged in.
-
-    Args:
-        submitted_by: str
+    Gets the training data for all unresolved cases in the database.
     """
     try:
-        result = db_queries.get_training_data(submitted_by)
+        result = db_queries.get_training_data(None)
 
         d1 = pd.DataFrame(result, columns=["label", "face_mesh"])
         d1["face_mesh"] = d1["face_mesh"].apply(lambda x: json.loads(x))
@@ -81,7 +78,7 @@ def train(submitted_by: str):
     try:
         labels, key_pts = get_train_data(submitted_by)
         if len(labels) == 0:
-            return {"status": False, "message": "No cases submitted by this user"}
+            return {"status": False, "message": "No unresolved cases registered in the system"}
         le = LabelEncoder()
         encoded_labels = le.fit_transform(labels)
         classifier = KNeighborsClassifier(

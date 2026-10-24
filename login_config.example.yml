@@ -1,0 +1,21 @@
+# Streamlit Authenticator configuration template
+# Copy this file to `login_config.yml` and update with your own credentials
+
+credentials:
+  usernames:
+    admin:
+      email: admin@example.com
+      name: Admin User
+      city: Pune
+      area: Central
+      role: Admin  # Admin or Officer
+      password: '$2b$12$JrAhELZdbS2BqhS4RaqmUeVK5NWOujIcIVH4zXbrWQR/WBiLAYhoG' # Example bcrypt hash (password: dhiraj123)
+
+cookie:
+  expiry_days: 1
+  key: your_secret_cookie_key_random_string_here
+  name: missing_person_auth_cookie
+
+preauthorized:
+  emails:
+    - admin@example.com
